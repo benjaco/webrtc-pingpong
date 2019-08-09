@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+
+<canvas id="canvas" width="500" height="200"></canvas>
+
+<script>
+
+    const canvas = document.getElementById('canvas');
+    const canvasctx = canvas.getContext('2d');
+
+
+    function findPeer() {
+        return new Promise((resolve, reject) => {
+            let isResolved = false;
+            let socket = new WebSocket("ws://localhost:3000/ws");
+            let peer = new RTCPeerConnection();
+
+            let channel = false;
+
+            peer.ondatachannel = (event) => {
+                const receiveChannel = event.channel;
+
+                isResolved = true;
+                socket.close();
+                resolve([receiveChannel, false]);
+            };
+
+            peer.onicecandidate = e => {
+                console.log("ice", e);
+                if (!e.candidate) return;
+
+                socket.send(JSON.stringify({
+                    type: "icecandidate",
+                    candidate: e.candidate
+                }));
+            };
+
+            socket.addEventListener("message", async rawmsg => {
+                console.log(rawmsg);
+                let msg = JSON.parse(rawmsg.data);
+
+
+                switch (msg.type) {
+                    case ":create_offer":
+                        channel = peer.createDataChannel("sendChannel");
+
+                        let offer = await peer.createOffer();
+                        await peer.setLocalDescription(offer);
+                        console.log("offer", offer);
+
+                        socket.send(JSON.stringify(offer));
+
+                        break;
+
+                    case "offer":
+                        await peer.setRemoteDescription(msg);
+
+                        let answer = await peer.createAnswer();
+                        await peer.setLocalDescription(answer);
+
+                        socket.send(JSON.stringify(answer));
+
+                        break;
+
+                    case "icecandidate":
+                        await peer.addIceCandidate(msg.candidate);
+                        break;
+
+                    case "answer":
+                        await peer.setRemoteDescription(msg);
+                        isResolved = true;
+                        socket.close();
+                        resolve([channel, true]);
+                        break;
+
+                    case ":peer_disconnected":
+                        setTimeout(_ => {
+                            if (isResolved) return;
+                            reject();
+                        }, 1000);
+                        break;
+
+                    default:
+                        console.log(msg);
+                }
+
+
+            });
+
+        })
+    }
+
+
+    class PongGame {
+        constructor(master, canvas, canvasContext, channel) {
+            console.log("master", master);
+            this.master = master;
+            this.canvas = canvas;
+            this.height = canvas.height;
+            this.width = canvas.width;
+            this.canvasContext = canvasContext;
+            this.channel = channel;
+
+            this.lastDraw = Date.now();
+            this.destroyed = false;
+
+            this.myTurn = !master;
+
+            this.playerY = canvas.height / 2;
+            this.playerScore = 0;
+            this.playerSideLeft = master;
+            this.playerVY = 0;
+
+            this.opponentY = canvas.height / 2;
+            this.opponentScore = 0;
+
+            this.playerHeight = 40;
+            this.playerWidth = 5;
+
+            this.ballX = 30;
+            this.ballY = canvas.height / 2;
+            this.ballVY = 0;
+            this.ballVX = 0;
+            this.ballRadius = 3;
+
+            this.lastPing = Date.now();
+            this.ondestroy = ()=>{};
+
+            channel.onmessage = (rawmsg) => {
+                let msg = JSON.parse(rawmsg.data);
+
+                switch (msg.type) {
+                    case "start":
+                        this.ballVY = msg.ballVY;
+                        this.ballVX = 200;
+                        break;
+
+                    case "new_game":
+                        this.playerScore++;
+
+                    case "your_turn":
+                        this.myTurn = true;
+                        this.ballVX = msg.ballVX;
+                        this.ballVY = msg.ballVY;
+                        this.ballX = msg.ballX;
+                        this.ballY = msg.ballY;
+                        break;
+
+                    case "move":
+                        this.opponentY = msg.y;
+                        break;
+
+                    case "ping":
+                        this.lastPing = Date.now();
+                        break;
+                }
+            };
+
+            this.ping = setInterval(() => {
+                if (channel.readyState !== "open") {
+                    this.destroy();
+                    return;
+                }
+                channel.send(JSON.stringify({type: "ping"}));
+
+                if (Date.now() - this.lastPing > 5000) {
+                    this.destroy();
+                }
+            }, 1000);
+
+            this.draw = this.draw.bind(this);
+            this.keyDown = this.keyDown.bind(this);
+            this.keyUp = this.keyUp.bind(this);
+            this.touchStart = this.touchStart.bind(this);
+            this.destroy = this.destroy.bind(this);
+
+            window.addEventListener("keydown", this.keyDown);
+            window.addEventListener("keyup", this.keyUp);
+            window.addEventListener("touchstart", this.touchStart);
+            window.addEventListener("touchend", this.keyUp);
+
+
+            this.draw();
+            if (master) {
+                setTimeout(() => {
+                    this.ballVY = Math.random()*5;
+                    this.ballVX = 200;
+                    channel.send(JSON.stringify({ type: "start", ballVY: this.ballVY }))
+                }, 5000);
+            }
+        }
+
+        async gameLogic() {
+            let sSinceFrame = (Date.now() - this.lastDraw) / 1000;
+            this.lastDraw = Date.now();
+
+
+            if (this.playerVY !== 0) {
+                this.playerY += this.playerVY * sSinceFrame;
+                this.playerY = Math.min(this.height - this.playerHeight, Math.max(0, this.playerY));
+                this.channel.send(JSON.stringify({
+                    "type": "move",
+                    y: this.playerY
+                }))
+            }
+
+            if (this.myTurn) {
+
+                let overLine = (this.playerSideLeft ? this.ballX < 10 : this.ballX > this.width - 20);
+                let insideMyPeddle = this.ballY + this.ballRadius + 5 > this.playerY
+                    && this.ballY + this.ballRadius - 5 < this.playerY + this.playerHeight;
+
+
+                if (overLine) {
+                    if (insideMyPeddle) {
+                        this.ballVX *= -1.005;
+                        this.ballVY -= ((this.playerY - this.ballY) / this.playerHeight + .5) * 500;
+
+                        this.channel.send(JSON.stringify({
+                            type: "your_turn",
+                            ballVX: this.ballVX,
+                            ballVY: this.ballVY,
+                            ballX: this.ballX,
+                            ballY: this.ballY
+                        }));
+
+                        this.myTurn = false;
+                    } else {
+                        this.ballVY = 0;
+                        this.ballVX = 0;
+                        this.ballX = (this.playerSideLeft ? 30 : this.width - 30);
+                        this.ballY = canvas.height / 2;
+                        this.myTurn = true;
+
+                        this.opponentScore++;
+
+                        this.channel.send(JSON.stringify({
+                            type: "new_game",
+                            ballVX: this.ballVX,
+                            ballVY: this.ballVY,
+                            ballX: this.ballX,
+                            ballY: this.ballY
+                        }));
+
+                        setTimeout(() => {
+                            if (this.destroyed) return;
+
+                            this.ballVY = Math.random() * 5;
+                            this.ballVX = 200 * (this.playerSideLeft ? 1 : -1);
+
+                            this.channel.send(JSON.stringify({
+                                type: "your_turn",
+                                ballVX: this.ballVX,
+                                ballVY: this.ballVY,
+                                ballX: this.ballX,
+                                ballY: this.ballY
+                            }))
+                        }, 500);
+
+
+                    }
+                }
+            }
+
+            this.ballX += this.ballVX * sSinceFrame;
+            this.ballY += this.ballVY * sSinceFrame;
+            if (this.ballY + this.ballRadius > this.height || this.ballY - this.ballRadius < 0) {
+                this.ballVY *= -0.98;
+                this.ballY = Math.min(Math.max(this.ballY, 0), this.height);
+            }
+        }
+
+        draw(){
+            if(this.destroyed) return;
+            this.gameLogic();
+
+            this.canvasContext.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+            this.canvasContext.beginPath();
+            this.canvasContext.arc(this.ballX, this.ballY, this.ballRadius, 0, 2 * Math.PI, false);
+            this.canvasContext.fillStyle = 'green';
+            this.canvasContext.fill();
+
+            this.canvasContext.fillStyle = 'red';
+
+            this.canvasContext.beginPath();
+            this.canvasContext.rect((this.playerSideLeft ? 5 : this.width-10), this.playerY, this.playerWidth, this.playerHeight  );
+            this.canvasContext.fill();
+
+            this.canvasContext.fillStyle = 'black';
+
+            this.canvasContext.beginPath();
+            this.canvasContext.rect((this.playerSideLeft ? this.width-10 : 5), this.opponentY, this.playerWidth, this.playerHeight  );
+            this.canvasContext.fill();
+
+            let leftText = "You: " + this.playerScore,
+                rightText = "Opponent: " + this.opponentScore;
+            if (!this.playerSideLeft) {
+                [leftText, rightText] = [rightText, leftText];
+            }
+
+            this.canvasContext.textAlign = "left";
+            this.canvasContext.fillText(leftText, 10,15);
+            this.canvasContext.textAlign = "right";
+            this.canvasContext.fillText(rightText, this.width-10, 15);
+
+
+            requestAnimationFrame(()=>this.draw());
+        }
+
+        keyDown(e){
+            if (e.code === "ArrowUp") {
+                this.playerVY = -400;
+            }else if (e.code === "ArrowDown") {
+                this.playerVY = 400;
+            }
+            console.log(this.playerVY)
+        }
+
+        touchStart(e) {
+            console.log(e.touches[0].pageY , window.innerHeight / 2)
+            if (e.touches[0].pageY > window.innerHeight / 2) {
+                this.playerVY = 400;
+            } else {
+                this.playerVY = -400;
+            }
+        }
+
+        keyUp(){
+            this.playerVY = 0;
+        }
+
+        destroy(){
+            this.destroyed = true;
+
+            try {
+                this.channel.close();
+            }catch (e) {}
+
+            window.removeEventListener("keydown", this.keyDown);
+            window.removeEventListener("keyup", this.keyUp);
+            window.removeEventListener("touchstart", this.touchStart);
+            window.removeEventListener("touchend", this.keyUp);
+
+            this.ondestroy();
+        }
+    }
+
+    /**
+     *
+     * @param canvas
+     * @param {CanvasRenderingContext2D}canvasContext
+     * @param text
+     */
+    function displayText(canvas, canvasContext, text) {
+        canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+        canvasContext.font = "20px Helvetica";
+        canvasContext.textAlign = "center";
+        canvasContext.fillText(text, canvas.width / 2, canvas.height / 2);
+    }
+
+
+    function startGame() {
+        displayText(canvas, canvasctx, "Waiting for player");
+
+
+        findPeer()
+            .then(([channel, opener]) => {
+                let game;
+                window.channel = channel;
+
+                channel.onopen = _ => {
+                    game = new PongGame(opener, canvas, canvasctx, channel)
+
+                    game.ondestroy = _ => {
+                        displayText(canvas, canvasctx, `Game ended, ${game.playerScore} / ${game.opponentScore}`);
+                        setTimeout(startGame, 5000)
+                    }
+                };
+                channel.onclose = _ => {
+                    game.destroy();
+                };
+            }).catch(startGame)
+
+    }
+
+    startGame();
+
+    window.onbeforeunload = function () {
+        try {
+            window.channel.close();
+        } catch (e) {
+
+        }
+    }
+
+</script>
+
+</body>
+</html>
