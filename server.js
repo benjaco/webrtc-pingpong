@@ -15,34 +15,34 @@ const wss = new ws.Server({server: server, path: "/ws"});
 
 wss.on('connection', function (ws) {
 
-    ws.hasPeer = (()=>{
+    ws.peer = (()=>{
         let other = Array.from(wss.clients).find(i =>
             i !== ws &&
             i.readyState === ws.OPEN &&
-            i.hasPeer === false );
+            i.peer === false );
 
         if (other) {
-            other.hasPeer = ws;
+            other.peer = ws;
             return other;
         }
         return false;
     })();
 
-    if (ws.hasPeer) {
+    if (ws.peer) {
         ws.send(JSON.stringify({type: ":create_offer"}))
     }
 
     ws.on('message', function (message) {
-        if (ws.hasPeer) {
-            ws.hasPeer.send(message);
+        if (ws.peer) {
+            ws.peer.send(message);
         }
     });
 
 
     ws.on('close', function () {
-        if (ws.hasPeer) {
-            ws.hasPeer.send(JSON.stringify({type: ":peer_disconnected"}));
-            ws.hasPeer.hasPeer = false;
+        if (ws.peer) {
+            ws.peer.send(JSON.stringify({type: ":peer_disconnected"}));
+            ws.peer.peer = false;
         }
     });
 });
